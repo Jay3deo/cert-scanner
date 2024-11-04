@@ -1,4 +1,6 @@
 from os.path import isdir
+import re
+import pymupdf
 from pathlib import Path
 import json
 import pytesseract
@@ -18,7 +20,9 @@ from concurrent.futures import ThreadPoolExecutor
 #n = notification
 #pt = prompt_text
 #a = answer
-mergable = {}
+
+
+config = {}
 def start() -> tuple[list[str] , bool]:
     file_paths = []
     r1 = Pretty(f'Hello {os.environ['USERNAME']}, Enter The File Location Of Where The Scanned Certs Are Being Stored')
@@ -90,7 +94,7 @@ def checkConfig() -> bool | dict[str,str | bool]:
                     return False
             if (os.path.isdir(locations['Scanned Certs'])
                 and os.path.isdir(locations['Renamed Certs'])):
-
+                config = locations
                 return locations
     return False
 
@@ -144,32 +148,40 @@ def startCertScan(config: dict[str, str | bool] | list[str]):
 
 
 def scan(image: os.DirEntry):
-
-    print('running scan')
     certNumber_rois = (112,2929,611,3195)
-    InstrumentID_rois = (179,809,551,954)
-    
-    with Image.open(Path(image)) as jpgImg: 
-        # jpgImg.convert('RGB').save(str(image.name).replace('.jpg','.pdf'),"PDF") 
-        certNumber_crop = jpgImg.crop(certNumber_rois)
-        instrumentID_crop = jpgImg.crop(InstrumentID_rois)
-        certNumber_scan = pytesseract.image_to_string(certNumber_crop, lang='eng')
-        instrumentID_scan = pytesseract.image_to_string(instrumentID_crop, lang='eng')
-        instrumentID_data = parseData(instrumentID_scan) 
-        certNumber_data = parseData(certNumber_scan) 
-        for file in os.scandir():
-            if certNumber_data in file.name:
-                mergeFiles(file, jpgImg)
-                return
-        renameFiles(image, f'3DEO-{instrumentID_data}'.__add__(f'_{certNumber_data}'))
 
-    return 
+    with pymupdf.open(image) as pdf:
+        page = pdf[0] 
+        page.set_cropbox(pymupdf.Rect(certNumber_rois))
+        pdf.save(config['Scanned Certs'])
+        scanned_data = pytesseract.image_to_string(page, lang='eng')
+        print(scanned_data)
 
-        
+
+    # while re.fullmatch(r'^3DEO-\d{3}$',scanned_data ):
+        #     print('sacn')
+
+    # WIP
+    # print('running scan')
+    # InstrumentID_rois = (179,809,551,954)
+    #
+    # with Image.open(Path(image)) as jpgImg: 
+    #     # jpgImg.convert('RGB').save(str(image.name).replace('.jpg','.pdf'),"PDF") 
+    #     certNumber_crop = jpgImg.crop(certNumber_rois)
+    #     instrumentID_crop = jpgImg.crop(InstrumentID_rois)
+    #     certNumber_scan = pytesseract.image_to_string(certNumber_crop, lang='eng')
+    #     instrumentID_scan = pytesseract.image_to_string(instrumentID_crop, lang='eng')
+    #     instrumentID_data = parseData(instrumentID_scan) 
+    #     certNumber_data = parseData(certNumber_scan) 
+    #     for file in os.scandir():
+    #             mergeFiles(file, jpgImg, image, certNumber_data,instrumentID_data)
+    #     renameFiles(image, f'3DEO-{instrumentID_data}'.__add__(f'_{certNumber_data}'))
+    # return 
+    #
+    #
 def renameFiles(original: os.DirEntry , new: str ):
     try:
-        print(new)
-        # os.rename(original, f'{new}.jpg')
+        os.rename(original, f'{new}.jpg')
     except FileExistsError:
         print(f'')
          
@@ -178,10 +190,32 @@ def renameFiles(original: os.DirEntry , new: str ):
      
 
 
-def mergeFiles(top: os.DirEntry, bottom: Image.Image):
-    with Image.open(top) as topImg:
-        topImg.convert("RGB").save(f'{topImg}.pdf',"PDF")
-    pass
+def mergeFiles(top: os.DirEntry, bottom: Image.Image, bottomPath: os.DirEntry,
+               certNumber: str, instrumentID: str):
+    topPdfPath = str(top).replace('.jpg','.pdf')
+    bottomPdfPath = str(bottomPath).replace('.jpg','.pdf')
+    mergable = []
+    mergable.append(topPdfPath)
+    mergable.append(bottomPdfPath)
+    topImg = Image.open(top) 
+        # topImg.convert("RGB").save(f'{topImg}.pdf',"PDF")
+    topImg.convert('RGB').save(topPdfPath, 'PDF')
+    topImg.close()
+     
+    bottom.convert('RGB').save(bottomPdfPath,'PDF')
+    bottom.close()
+
+    with Image.open(topPdfPath) as topPdf ,Image.open(bottomPdfPath) as bottomPdf:
+        merger = PdfWriter() 
+
+        [merger.append(img) for img in mergable]
+        merger.write(f'3DEO-{instrumentID}_{certNumber}.pdf')
+        merger.close()
+
+        
+    # os.remove(top)
+    # os.remove(bottomPath)
+    return
 
 
 
