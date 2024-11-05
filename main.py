@@ -1,6 +1,8 @@
 import functools
 from os.path import isdir
-from typing import final
+import re
+from typing import Match, final
+from PIL.ImageFile import ImageFile
 import pymupdf
 from pypdf import PdfWriter
 from pathlib import Path
@@ -143,32 +145,31 @@ def startCertScan(config: dict[str, str | bool] | list[str]):
     setup = list(zip(images_array,results))
     finalSetup = []
     for i in setup:
-        if i[1][0] == 22:
+        if i[1] == 22:
             finalSetup.append(i)
-        elif i[1][0] == 11:
+        elif i[1] == 11:
             finalSetup.insert(0,i)
         else:
             if len(finalSetup) == 0:
                 finalSetup.append(i)
                 continue
             for idx,l in enumerate(finalSetup):
-                print(idx, l)
-                if l[1][0] == 22:
+                if l[1] == 12:
+                    finalSetup.insert(idx,i)
+                    break
+                elif l[1] == 22:
                     finalSetup.insert(idx-1,i)
-                elif idx == len(finalSetup):
-                    finalSetup.append(i)
-                    print(idx,'ENDD')
                     break
                 
-    print(finalSetup)
 
 
 
-    # z = [functools.partial(scanCertNum_and_id, imagePath_and_frontCheck=x) for x in page_setup[11]]
-    # print(z)
+    z = [functools.partial(scanCertNum_and_id, imagePath_and_pageNum=x) for x in finalSetup]
+    
+    with ThreadPoolExecutor(max_workers=6) as exe:
+        results = list(exe.map(lambda f: f(), z))
 
-
-def scanPageNumber(image: os.DirEntry) -> tuple[int, bool]:
+def scanPageNumber(image: os.DirEntry) -> int:
 
     print('running scan')
     pageNumber_rois = (2160,2958,2466,3208)
@@ -178,15 +179,78 @@ def scanPageNumber(image: os.DirEntry) -> tuple[int, bool]:
         pageNumber_scan = pytesseract.image_to_string(pageNumber_crop, lang='eng')
         pageNumber_data = parseData(pageNumber_scan) 
         if pageNumber_data == '11' or pageNumber_data == '12': #if the page if pg 1 of 1 or pg 1 of 2 we have the front page
-            return int(pageNumber_data),True
+            return int(pageNumber_data)
         
-        return int(pageNumber_data),False # else page 2 of 2 is the back page
+        return int(pageNumber_data)# else page 2 of 2 is the back page
         
 
 
-def scanCertNum_and_id(imagePath_and_frontCheck: tuple[os.DirEntry,bool]):
-    imagePath , frontCheck = imagePath_and_frontCheck
-    print(imagePath,frontCheck)
+def scanCertNum_and_id(imagePath_and_pageNum: tuple[os.DirEntry,bool]):
+    cnf: list[tuple[os.DirEntry,str | None]] = []
+    imagePath , pageNum= imagePath_and_pageNum
+
+    certNum_roi = (52,3040,526,3212)
+    certNum_pattern = r'^\d{6}$'
+    id_roi = (64,734,586,1058) 
+    id_pattern = r'\d{1,3}'
+
+    if pageNum == 22:
+        print('just scan cer number and wait')
+    else:
+        with Image.open(imagePath) as file:
+            id_crop = file.crop(id_roi)
+            certNum_crop = file.crop(certNum_roi)
+            cerNum_data = pytesseract.image_to_string(certNum_crop)
+            id_data = pytesseract.image_to_string(id_crop)
+            instrumentID = parseData(id_data)
+            certNumber = parseData(cerNum_data)
+            id_match = re.search(id_pattern, instrumentID.strip())
+            certNum_match = re.fullmatch(certNum_pattern, certNumber.strip())
+            if certNum_match == None:
+                matchRetry = rescan(file,certNum_roi,certNum_pattern)
+                if isinstance(matchRetry,re.Match):
+                    certNumber = matchRetry.group()
+            else:
+                print(certNumber)
+
+            if id_match == None:
+                matchRetry = rescan(file, id_roi, id_pattern)
+                if isinstance(matchRetry,re.Match):
+                    print('<><><><><><><><><><><><><><><>')
+                    print(matchRetry.group())
+                    print('<><><><><><><><><><><><><><><>')
+                else:
+                    print(f'no match for {imagePath}')
+            else:
+                print(instrumentID)
+
+
+
+
+
+
+
+def rescan(file: ImageFile, roi, pattern: str) -> re.Match | bool:
+    
+    n=50
+    while True:
+        newRoi = tuple(x + n for x in roi)
+        newCrop = file.crop(newRoi)
+        newData = pytesseract.image_to_string(newCrop)
+        match = re.search(pattern, newData)
+        if n > 400:
+            print('no match could be found')
+            return False 
+        if not match:
+            n += 50
+            continue
+        else: 
+            break
+
+    return match
+
+
+
         
 def renameFiles(original: os.DirEntry , new: str ):
     try:
@@ -213,8 +277,10 @@ def parseData(data: str):
             int(letter)
         except (TypeError, ValueError):
             data = data.replace(letter, '')
-    if data.startswith('0'):
+    if (data.startswith('3') or data.startswith('0')) and len(data) == 4:
         data = '' + data[1:]
+    if len(data) == 5:
+        data = '' + data[2:]
     return data
 
 def afterScanCleanup():
