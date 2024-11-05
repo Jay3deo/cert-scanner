@@ -1,6 +1,8 @@
+import functools
 from os.path import isdir
-import re
+from typing import final
 import pymupdf
+from pypdf import PdfWriter
 from pathlib import Path
 import json
 import pytesseract
@@ -20,9 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 #n = notification
 #pt = prompt_text
 #a = answer
-
-
-config = {}
 def start() -> tuple[list[str] , bool]:
     file_paths = []
     r1 = Pretty(f'Hello {os.environ['USERNAME']}, Enter The File Location Of Where The Scanned Certs Are Being Stored')
@@ -94,7 +93,7 @@ def checkConfig() -> bool | dict[str,str | bool]:
                     return False
             if (os.path.isdir(locations['Scanned Certs'])
                 and os.path.isdir(locations['Renamed Certs'])):
-                config = locations
+
                 return locations
     return False
 
@@ -137,85 +136,74 @@ def startCertScan(config: dict[str, str | bool] | list[str]):
 
     if len(images_array) > 8:
         with ThreadPoolExecutor(max_workers=6) as exe:
-            results = exe.map(scan,images_array)
-            
-        print(list(results))
+            results = list(exe.map(scanPageNumber,images_array))
     else:
-        results = map(scan,images_array)
-        print(list(results))
+        results = list(map(scanPageNumber,images_array))
+    
+    setup = list(zip(images_array,results))
+    finalSetup = []
+    for i in setup:
+        if i[1][0] == 22:
+            finalSetup.append(i)
+        elif i[1][0] == 11:
+            finalSetup.insert(0,i)
+        else:
+            if len(finalSetup) == 0:
+                finalSetup.append(i)
+                continue
+            for idx,l in enumerate(finalSetup):
+                print(idx, l)
+                if l[1][0] == 22:
+                    finalSetup.insert(idx-1,i)
+                elif idx == len(finalSetup):
+                    finalSetup.append(i)
+                    print(idx,'ENDD')
+                    break
+                
+    print(finalSetup)
+
+
+
+    # z = [functools.partial(scanCertNum_and_id, imagePath_and_frontCheck=x) for x in page_setup[11]]
+    # print(z)
+
+
+def scanPageNumber(image: os.DirEntry) -> tuple[int, bool]:
+
+    print('running scan')
+    pageNumber_rois = (2160,2958,2466,3208)
+    
+    with Image.open(Path(image)) as jpgImg: 
+        pageNumber_crop = jpgImg.crop(pageNumber_rois)
+        pageNumber_scan = pytesseract.image_to_string(pageNumber_crop, lang='eng')
+        pageNumber_data = parseData(pageNumber_scan) 
+        if pageNumber_data == '11' or pageNumber_data == '12': #if the page if pg 1 of 1 or pg 1 of 2 we have the front page
+            return int(pageNumber_data),True
+        
+        return int(pageNumber_data),False # else page 2 of 2 is the back page
         
 
 
-
-def scan(image: os.DirEntry):
-    certNumber_rois = (112,2929,611,3195)
-
-    with pymupdf.open(image) as pdf:
-        page = pdf[0] 
-        page.set_cropbox(pymupdf.Rect(certNumber_rois))
-        pdf.save(config['Scanned Certs'])
-        scanned_data = pytesseract.image_to_string(page, lang='eng')
-        print(scanned_data)
-
-
-    # while re.fullmatch(r'^3DEO-\d{3}$',scanned_data ):
-        #     print('sacn')
-
-    # WIP
-    # print('running scan')
-    # InstrumentID_rois = (179,809,551,954)
-    #
-    # with Image.open(Path(image)) as jpgImg: 
-    #     # jpgImg.convert('RGB').save(str(image.name).replace('.jpg','.pdf'),"PDF") 
-    #     certNumber_crop = jpgImg.crop(certNumber_rois)
-    #     instrumentID_crop = jpgImg.crop(InstrumentID_rois)
-    #     certNumber_scan = pytesseract.image_to_string(certNumber_crop, lang='eng')
-    #     instrumentID_scan = pytesseract.image_to_string(instrumentID_crop, lang='eng')
-    #     instrumentID_data = parseData(instrumentID_scan) 
-    #     certNumber_data = parseData(certNumber_scan) 
-    #     for file in os.scandir():
-    #             mergeFiles(file, jpgImg, image, certNumber_data,instrumentID_data)
-    #     renameFiles(image, f'3DEO-{instrumentID_data}'.__add__(f'_{certNumber_data}'))
-    # return 
-    #
-    #
+def scanCertNum_and_id(imagePath_and_frontCheck: tuple[os.DirEntry,bool]):
+    imagePath , frontCheck = imagePath_and_frontCheck
+    print(imagePath,frontCheck)
+        
 def renameFiles(original: os.DirEntry , new: str ):
     try:
         os.rename(original, f'{new}.jpg')
     except FileExistsError:
-        print(f'')
-         
+        mergeFiles(
+                top=Path(f'{new}.jpg'),
+                bottom=original
+                )
         pass
     return 
      
 
+def mergeFiles(top: Path, bottom: os.DirEntry):
+    with pymupdf.open(top) as topFile:
+        topFile.convert_to_pdf()
 
-def mergeFiles(top: os.DirEntry, bottom: Image.Image, bottomPath: os.DirEntry,
-               certNumber: str, instrumentID: str):
-    topPdfPath = str(top).replace('.jpg','.pdf')
-    bottomPdfPath = str(bottomPath).replace('.jpg','.pdf')
-    mergable = []
-    mergable.append(topPdfPath)
-    mergable.append(bottomPdfPath)
-    topImg = Image.open(top) 
-        # topImg.convert("RGB").save(f'{topImg}.pdf',"PDF")
-    topImg.convert('RGB').save(topPdfPath, 'PDF')
-    topImg.close()
-     
-    bottom.convert('RGB').save(bottomPdfPath,'PDF')
-    bottom.close()
-
-    with Image.open(topPdfPath) as topPdf ,Image.open(bottomPdfPath) as bottomPdf:
-        merger = PdfWriter() 
-
-        [merger.append(img) for img in mergable]
-        merger.write(f'3DEO-{instrumentID}_{certNumber}.pdf')
-        merger.close()
-
-        
-    # os.remove(top)
-    # os.remove(bottomPath)
-    return
 
 
 
