@@ -1,12 +1,15 @@
 import functools
+import img2pdf
 from os.path import isdir
 import re
+from subprocess import IDLE_PRIORITY_CLASS
 from typing import Match, final
 from PIL.ImageFile import ImageFile
 import pymupdf
 from pypdf import PdfWriter
 from pathlib import Path
 import json
+import pypdf
 import pytesseract
 import os, sys
 from PIL import Image
@@ -160,7 +163,6 @@ def startCertScan(config: dict[str, str | bool] | list[str]):
                 elif l[1] == 22:
                     finalSetup.insert(idx-1,i)
                     break
-                
 
 
 
@@ -169,119 +171,190 @@ def startCertScan(config: dict[str, str | bool] | list[str]):
     with ThreadPoolExecutor(max_workers=6) as exe:
         results = list(exe.map(lambda f: f(), z))
 
+        print(results)
+
 def scanPageNumber(image: os.DirEntry) -> int:
 
     print('running scan')
     pageNumber_rois = (2160,2958,2466,3208)
-    
+    pageNumber_pattern = 'Page [1-2] of [1-2]'    
     with Image.open(Path(image)) as jpgImg: 
         pageNumber_crop = jpgImg.crop(pageNumber_rois)
         pageNumber_scan = pytesseract.image_to_string(pageNumber_crop, lang='eng')
-        pageNumber_data = parseData(pageNumber_scan) 
-        if pageNumber_data == '11' or pageNumber_data == '12': #if the page if pg 1 of 1 or pg 1 of 2 we have the front page
-            return int(pageNumber_data)
-        
-        return int(pageNumber_data)# else page 2 of 2 is the back page
-        
+        match = re.search(pageNumber_pattern,pageNumber_scan)
+        if match:
+            
+            pageNumber_data = parsePageNumber(pageNumber_scan) 
+            if pageNumber_data == '11' or pageNumber_data == '12': #if the page if pg 1 of 1 or pg 1 of 2 we have the front page
+                return int(pageNumber_data)
+            
+            return int(pageNumber_data)# else page 2 of 2 is the back page
+        else:
+            matchRetry = rescan(jpgImg,pageNumber_rois,pageNumber_pattern)
+            if matchRetry:
+
+                pageNumber_data = parsePageNumber(pageNumber_scan) 
+                if pageNumber_data == '11' or pageNumber_data == '12': #if the page if pg 1 of 1 or pg 1 of 2 we have the front page
+                    return int(pageNumber_data)
+                
+                return int(pageNumber_data)#
+            return 0
 
 
 def scanCertNum_and_id(imagePath_and_pageNum: tuple[os.DirEntry,bool]):
     cnf: list[tuple[os.DirEntry,str | None]] = []
     imagePath , pageNum= imagePath_and_pageNum
 
-    certNum_roi = (52,3040,526,3212)
-    certNum_pattern = r'^\d{6}$'
-    id_roi = (64,734,586,1058) 
-    id_pattern = r'\d{1,3}'
+    certNum_roi = (58,2900,538,3220)
+    certNum_pattern = r"Cert Number[: ]?\s?(\d+})"
+    id_roi = (58,666,708,1122) 
+    id_pattern = r'3DEO-\d{1,3}'
 
     if pageNum == 22:
-        print('just scan cer number and wait')
+        with Image.open(imagePath) as file:
+            certNum_crop = file.crop(certNum_roi)
+            certNum_data = pytesseract.image_to_string(certNum_crop)
+            certNumber = parseDataCertNumber(certNum_data)
+            if certNumber:
+                renameFiles(imagePath,certNumber)
+                for cert in os.listdir(os.path.dirname(imagePath)):
+                    if certNumber in cert:
+                        print(f'FOUND THE MATCH: {cert}, {certNumber} ')
+                        mergeFiles(Path(cert),file,certNumber )
+                        
     else:
         with Image.open(imagePath) as file:
             id_crop = file.crop(id_roi)
             certNum_crop = file.crop(certNum_roi)
-            cerNum_data = pytesseract.image_to_string(certNum_crop)
+            certNum_data = pytesseract.image_to_string(certNum_crop)
             id_data = pytesseract.image_to_string(id_crop)
-            instrumentID = parseData(id_data)
-            certNumber = parseData(cerNum_data)
-            id_match = re.search(id_pattern, instrumentID.strip())
-            certNum_match = re.fullmatch(certNum_pattern, certNumber.strip())
-            if certNum_match == None:
+            instrumentID = parseDataInstrumentID(id_data)
+            certNumber = parseDataCertNumber(certNum_data)
+
+            if certNumber == None:
                 matchRetry = rescan(file,certNum_roi,certNum_pattern)
-                if isinstance(matchRetry,re.Match):
-                    certNumber = matchRetry.group()
-            else:
-                print(certNumber)
-
-            if id_match == None:
-                matchRetry = rescan(file, id_roi, id_pattern)
-                if isinstance(matchRetry,re.Match):
-                    print('<><><><><><><><><><><><><><><>')
-                    print(matchRetry.group())
-                    print('<><><><><><><><><><><><><><><>')
+                if matchRetry:
+                    certNumber = matchRetry
                 else:
-                    print(f'no match for {imagePath}')
-            else:
-                print(instrumentID)
+                    print(f'no match for {imagePath}', certNum_data)
+                    print(f'{imagePath.name}')
+                    cnf.append(imagePath.name)
+                    return
+
+            if instrumentID == None:
+                matchRetry = rescan(file, id_roi, id_pattern)
+                if matchRetry:
+                    instrumentID = matchRetry
+                else:
+                    print(f'no match for {imagePath}', id_data)
+                    print(f'Could not read: {imagePath.name}')
+                    cnf.append(imagePath.name)
+                    return
+            renameFiles(imagePath,f'{instrumentID}_{certNumber}')
 
 
 
-
-
-
-
-def rescan(file: ImageFile, roi, pattern: str) -> re.Match | bool:
-    
-    n=50
+def rescan(file: ImageFile, roi, pattern: str) -> str | bool:
+    print(f'rescanning {file}')
+    adding = True 
+    subtracting = False
+    n=100
     while True:
+        print(n)
         newRoi = tuple(x + n for x in roi)
         newCrop = file.crop(newRoi)
         newData = pytesseract.image_to_string(newCrop)
         match = re.search(pattern, newData)
-        if n > 400:
-            print('no match could be found')
-            return False 
-        if not match:
-            n += 50
-            continue
-        else: 
-            break
-
-    return match
+        if adding:
+            if n > 800:
+                adding = False
+                subtracting = True
+                continue
+        if n == 0:
+            print(newData)
+            return False
+        if adding:
+            if not match:
+                n += 50
+                continue
+        if subtracting:
+            if not match:
+                n -=50
+                continue
+            else: 
+                break
+    print(match.group())
+    return match.group()
 
 
 
         
 def renameFiles(original: os.DirEntry , new: str ):
-    try:
-        os.rename(original, f'{new}.jpg')
-    except FileExistsError:
-        mergeFiles(
-                top=Path(f'{new}.jpg'),
-                bottom=original
-                )
-        pass
-    return 
+    os.rename(original, f'{new}.jpg')
+    return f'{new}.jpg'
+         
+
+def mergeFiles(top: Path, bottom: ImageFile, certNumber: str):
+    converted_top_name = str(top).replace('.jpg','.pdf')
+    merger = pypdf.PdfWriter()
+    with Image.open(top) as topFile:
+        topFile.save(top.name.replace('.jpg','.pdf'), "PDF")
+    bottom.save(certNumber + '.pdf', "PDF")
+    merge = [converted_top_name,certNumber + '.pdf']
+    for file in merge:
+        merger.append(file)
+
+    merger.write(top.name.replace('.jpg','.pdf'))
+    merger.close()
+    os.remove(certNumber + '.pdf')
+    os.remove(top)
      
 
-def mergeFiles(top: Path, bottom: os.DirEntry):
-    with pymupdf.open(top) as topFile:
-        topFile.convert_to_pdf()
 
+def parseDataInstrumentID(data: str) -> str | None:
+    id_pattern = r'3DEO-\d{1,3}'
+    bad_id_pattern = r'3DE0-\d{1,3}'
+    match = re.search(id_pattern, data)
+    if match:
+        return match.group()
+    else:
+        matchRetry = re.search(bad_id_pattern, data)
+        if matchRetry:
+            return matchRetry.group().replace('3DE0', '3DEO')
+        return None
+    # for letter in data:
+    #     try:
+    #         int(letter)
+    #     except (TypeError, ValueError):
+    #         data = data.replace(letter, '')
+    # if (data.startswith('3') or data.startswith('0')) and len(data) == 4:
+    #     data = '' + data[1:]
+    # return data
 
-
-
-def parseData(data: str):
+def parseDataCertNumber(data: str):
+    certNum_pattern = r"Cert Number[: ]?\s?(\d+)"
+    match = re.search(certNum_pattern, data)
+    if match:
+        data = match.group()
+    else:
+        return None
     for letter in data:
         try:
             int(letter)
         except (TypeError, ValueError):
             data = data.replace(letter, '')
-    if (data.startswith('3') or data.startswith('0')) and len(data) == 4:
-        data = '' + data[1:]
-    if len(data) == 5:
-        data = '' + data[2:]
     return data
+
+
+def parsePageNumber(data: str):
+    for letter in data:
+        try:
+            int(letter)
+        except (TypeError, ValueError):
+            data = data.replace(letter, '')
+    return data
+
+
 
 def afterScanCleanup():
     '''delete all files in the scanned certs directory
