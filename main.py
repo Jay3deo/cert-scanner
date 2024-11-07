@@ -146,32 +146,42 @@ def startCertScan(config: dict[str, str | bool] | list[str]):
         results = list(map(scanPageNumber,images_array))
     
     setup = list(zip(images_array,results))
-    finalSetup = []
+    frontCerts = [] 
+    backCerts = []
     for i in setup:
         if i[1] == 22:
-            finalSetup.append(i)
-        elif i[1] == 11:
-            finalSetup.insert(0,i)
+            backCerts.append(i[0])
         else:
-            if len(finalSetup) == 0:
-                finalSetup.append(i)
-                continue
-            for idx,l in enumerate(finalSetup):
-                if l[1] == 12:
-                    finalSetup.insert(idx,i)
-                    break
-                elif l[1] == 22:
-                    finalSetup.insert(idx-1,i)
-                    break
+            frontCerts.append(i[0])
 
 
 
-    z = [functools.partial(scanCertNum_and_id, imagePath_and_pageNum=x) for x in finalSetup]
+    front = [functools.partial(scanCertNum_and_id, imagePath=x) for x in frontCerts]
+    back = [functools.partial(scanBackCerts,imagePath=x) for x in backCerts]
     
     with ThreadPoolExecutor(max_workers=6) as exe:
-        results = list(exe.map(lambda f: f(), z))
+        _= exe.map(lambda f: f(), front)
 
-        print(results)
+    with ThreadPoolExecutor(max_workers=6) as exe:
+        _= exe.map(lambda f: f(), back)
+
+
+
+
+def scanBackCerts(imagePath: os.DirEntry):
+    certNum_roi = (58,2900,538,3220)
+
+    with Image.open(imagePath) as file:
+        certNum_crop = file.crop(certNum_roi)
+        certNum_data = pytesseract.image_to_string(certNum_crop)
+        certNumber = parseDataCertNumber(certNum_data)
+        if certNumber:
+            renameFiles(imagePath,certNumber)
+            for cert in os.listdir(os.path.dirname(imagePath)):
+                if certNumber in cert:
+                    print(f'FOUND THE MATCH: {cert}, {certNumber} ')
+                    mergeFiles(Path(cert),file,certNumber )
+ 
 
 def scanPageNumber(image: os.DirEntry) -> int:
 
@@ -201,56 +211,43 @@ def scanPageNumber(image: os.DirEntry) -> int:
             return 0
 
 
-def scanCertNum_and_id(imagePath_and_pageNum: tuple[os.DirEntry,bool]):
+def scanCertNum_and_id(imagePath: os.DirEntry):
     cnf: list[tuple[os.DirEntry,str | None]] = []
-    imagePath , pageNum= imagePath_and_pageNum
 
     certNum_roi = (58,2900,538,3220)
     certNum_pattern = r"Cert Number[: ]?\s?(\d+})"
     id_roi = (58,666,708,1122) 
     id_pattern = r'3DEO-\d{1,3}'
 
-    if pageNum == 22:
-        with Image.open(imagePath) as file:
-            certNum_crop = file.crop(certNum_roi)
-            certNum_data = pytesseract.image_to_string(certNum_crop)
-            certNumber = parseDataCertNumber(certNum_data)
-            if certNumber:
-                renameFiles(imagePath,certNumber)
-                for cert in os.listdir(os.path.dirname(imagePath)):
-                    if certNumber in cert:
-                        print(f'FOUND THE MATCH: {cert}, {certNumber} ')
-                        mergeFiles(Path(cert),file,certNumber )
-                        
-    else:
-        with Image.open(imagePath) as file:
-            id_crop = file.crop(id_roi)
-            certNum_crop = file.crop(certNum_roi)
-            certNum_data = pytesseract.image_to_string(certNum_crop)
-            id_data = pytesseract.image_to_string(id_crop)
-            instrumentID = parseDataInstrumentID(id_data)
-            certNumber = parseDataCertNumber(certNum_data)
+                       
+    with Image.open(imagePath) as file:
+        id_crop = file.crop(id_roi)
+        certNum_crop = file.crop(certNum_roi)
+        certNum_data = pytesseract.image_to_string(certNum_crop)
+        id_data = pytesseract.image_to_string(id_crop)
+        instrumentID = parseDataInstrumentID(id_data)
+        certNumber = parseDataCertNumber(certNum_data)
 
-            if certNumber == None:
-                matchRetry = rescan(file,certNum_roi,certNum_pattern)
-                if matchRetry:
-                    certNumber = matchRetry
-                else:
-                    print(f'no match for {imagePath}', certNum_data)
-                    print(f'{imagePath.name}')
-                    cnf.append(imagePath.name)
-                    return
+        if certNumber == None:
+            matchRetry = rescan(file,certNum_roi,certNum_pattern)
+            if matchRetry:
+                certNumber = matchRetry
+            else:
+                print(f'no match for {imagePath}', certNum_data)
+                print(f'{imagePath.name}')
+                cnf.append(imagePath.name)
+                return
 
-            if instrumentID == None:
-                matchRetry = rescan(file, id_roi, id_pattern)
-                if matchRetry:
-                    instrumentID = matchRetry
-                else:
-                    print(f'no match for {imagePath}', id_data)
-                    print(f'Could not read: {imagePath.name}')
-                    cnf.append(imagePath.name)
-                    return
-            renameFiles(imagePath,f'{instrumentID}_{certNumber}')
+        if instrumentID == None:
+            matchRetry = rescan(file, id_roi, id_pattern)
+            if matchRetry:
+                instrumentID = matchRetry
+            else:
+                print(f'no match for {imagePath}', id_data)
+                print(f'Could not read: {imagePath.name}')
+                cnf.append(imagePath.name)
+                return
+        renameFiles(imagePath,f'{instrumentID}_{certNumber}')
 
 
 
